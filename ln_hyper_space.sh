@@ -1,109 +1,125 @@
 #!/bin/bash
-# Stop any running aios-cli process
-echo "[INFO] Stopping any running aios-cli processes..."
-aios-cli kill
-sleep 1
 
-# Delete any existing screen sessions with name "hyperspace"
-echo "[INFO] Searching for existing 'hyperspace' screen sessions..."
-existing_screens=$(screen -ls | grep "\.hyperspace" | awk -F. '{print $1}')
-if [ -n "$existing_screens" ]; then
-    for scr in $existing_screens; do
-        echo "[INFO] Deleting existing screen session with ID: $scr"
-        screen -S "$scr.hyperspace" -X quit
-    done
-else
-    echo "[INFO] No existing 'hyperspace' screen sessions found."
-fi
-sleep 1
+download_node() {
+  echo "Starting installation..."
 
-# Download model by default
-echo "[INFO] Downloading model..."
-url="https://huggingface.com/afrideva/Tiny-Vicuna-1B-GGUF/resolve/main/tiny-vicuna-1b.q8_0.gguf"
-model_folder="/root/.cache/hyperspace/models/hf__afrideva___Tiny-Vicuna-1B-GGUF__tiny-vicuna-1b.q8_0.gguf"
-model_path="$model_folder/tiny-vicuna-1b.q8_0.gguf"
-if [ ! -d "$model_folder" ]; then
-    echo "[INFO] Model folder not found. Creating folder: $model_folder"
-    mkdir -p "$model_folder"
-fi
+  # Load private key from file (should be located in $HOME)
+  if [ -f "$HOME/hype_space_private.txt" ]; then
+    cat "$HOME/hype_space_private.txt" > "$HOME/my.pem"
+    echo "Private key successfully loaded from hype_space_private.txt"
+  else
+    echo "File hype_space_private.txt not found. Exiting."
+    exit 1
+  fi
 
-if [ ! -f "$model_path" ]; then
-    echo "[INFO] Downloading model from $url..."
-    wget -q --show-progress "$url" -O "$model_path"
-    if [ -f "$model_path" ]; then
-        echo "[SUCCESS] Model downloaded successfully to $model_path."
-    else
-        echo "[ERROR] Failed to download the model."
+  session="hyperspacenode"
+  cd "$HOME" || exit
+
+  # Update system packages
+  sudo DEBIAN_FRONTEND=noninteractive apt-get update -y && \
+  sudo DEBIAN_FRONTEND=noninteractive apt-get upgrade -y
+
+  # Install required packages
+  sudo DEBIAN_FRONTEND=noninteractive apt-get install wget make tar screen nano libssl3-dev build-essential unzip lz4 gcc git jq -y
+
+  packages="wget make tar screen nano libssl3-dev build-essential unzip lz4 gcc git jq"
+
+  check_and_install() {
+    if ! dpkg -s "$1" >/dev/null 2>&1; then
+      sudo DEBIAN_FRONTEND=noninteractive apt-get install "$1" -y
     fi
-else
-    echo "[INFO] Model already exists at $model_path. Skipping download."
-fi
-sleep 1
+  }
 
-# Import private key from hyperspace_private_key.txt
-if [ -f "hyperspace_private_key.txt" ]; then
-    echo "[INFO] Importing private key from hyperspace_private_key.txt..."
-    cat hyperspace_private_key.txt > .pem
-    aios-cli hive import-keys ./.pem
-else
-    echo "[WARNING] hyperspace_private_key.txt not found. Skipping private key import."
-fi
-sleep 1
+  for package in $packages; do
+    check_and_install "$package"
+  done
 
-# Create a new screen session named "hyperspace" with logging enabled
-# Create a temporary screen configuration file to log to hyperspace.log
-cat <<EOF > /tmp/hyperspace_screenrc
-logfile hyperspace.log
-log on
-EOF
+  # Remove previous installation if exists
+  if [ -d "$HOME/.aios" ]; then
+    sudo rm -rf "$HOME/.aios"
+    aios-cli kill
+  fi
 
-echo "[INFO] Creating new screen session 'hyperspace' with logging enabled..."
-screen -dmS hyperspace -c /tmp/hyperspace_screenrc
-sleep 1
+  if screen -list | grep -q "\.${session}"; then
+    screen -S hyperspacenode -X quit
+  else
+    echo "Session ${session} not found."
+  fi
 
-# Start aios-cli in the "hyperspace" screen session
-echo "[INFO] Starting aios-cli in screen session 'hyperspace'..."
-screen -S hyperspace -X stuff "aios-cli start\n"
-sleep 1
+  # Install hyperspace node client
+  while true; do
+    curl -s https://download.hyper.space/api/install | bash | tee "$HOME/hyperspacenode_install.log"
+    if ! grep -q "Failed to parse version from release data." "$HOME/hyperspacenode_install.log"; then
+      echo "Client script installed successfully."
+      break
+    else
+      echo "Installation server unavailable, retrying in 30 seconds..."
+      sleep 30
+    fi
+  done
 
-# Run Hive commands
-echo "[INFO] Logging in to Hive..."
-aios-cli hive login
-sleep 1
+  rm "$HOME/hyperspacenode_install.log"
 
-echo "[INFO] Selecting Tier 5..."
-aios-cli hive select-tier 5
-sleep 1
+  export PATH="$PATH:$HOME/.aios"
+  source "$HOME/.bashrc"
+  eval "$(tail -n +10 "$HOME/.bashrc")"
 
-echo "[INFO] Connecting to Hive..."
-aios-cli hive connect
-sleep 1
+  screen -dmS hyperspacenode bash -c '
+    echo "Starting script in screen session"
+    aios-cli start
+    exec bash
+  '
 
-# Set inference prompt with LazyNode branding
-infer_prompt="What is LazyNode? Describe the node community."
+  # Install model
+  while true; do
+    aios-cli models add hf:TheBloke/phi-2-GGUF:phi-2.Q4_K_M.gguf 2>&1 | tee "$HOME/hyperspacemodel_download.log"
+    if grep -q "Download complete" "$HOME/hyperspacemodel_download.log"; then
+      echo "Model installed successfully."
+      break
+    else
+      echo "Model installation server unavailable, retrying in 30 seconds..."
+      sleep 30
+    fi
+  done
 
-# Run inference using aios-cli
-echo "[INFO] Running inference with aios-cli..."
-if aios-cli infer --model hf:afrideva/Tiny-Vicuna-1B-GGUF:tiny-vicuna-1b.q8_0.gguf --prompt "$infer_prompt"; then
-    echo "[SUCCESS] aios-cli inference completed successfully."
-else
-    echo "[ERROR] aios-cli inference failed."
-fi
-sleep 1
+  rm "$HOME/hyperspacemodel_download.log"
 
-# Run Hive inference
-echo "[INFO] Running Hive inference..."
-if aios-cli hive infer --model hf:afrideva/Tiny-Vicuna-1B-GGUF:tiny-vicuna-1b.q8_0.gguf --prompt "$infer_prompt"; then
-    echo "[SUCCESS] Hive inference completed successfully."
-else
-    echo "[ERROR] Hive inference failed."
-fi
-sleep 1
+  # Import keys and connect to hive
+  aios-cli hive import-keys "$HOME/my.pem"
+  aios-cli hive login
+  aios-cli hive connect
+}
 
-# Reconnect aios-cli in the screen session (with the connect flag)
-echo "[INFO] Restarting aios-cli with connect flag in screen session 'hyperspace'..."
-screen -S hyperspace -X stuff "aios-cli start --connect\n"
-sleep 1
+start_points_monitor() {
+  echo "Starting points monitoring..."
 
-echo "[INFO] Process completed."
-echo "DONE. Check the logs in 'hyperspace.log' or attach to the screen session with: screen -r hyperspace"
+  # Create the points monitoring script
+  cat > "$HOME/points_monitor_hyperspace.sh" << 'EOL'
+#!/bin/bash
+SCREEN_NAME="hyperspacenode"
+LAST_POINTS="0"
+
+while true; do
+    CURRENT_POINTS=$(aios-cli hive points | grep "Points:" | awk '{print $2}')
+    
+    if [ "$CURRENT_POINTS" = "$LAST_POINTS" ] || { [ "$CURRENT_POINTS" != "NaN" ] && [ "$LAST_POINTS" != "NaN" ] && [ "$CURRENT_POINTS" -eq "$LAST_POINTS" ]; }; then
+        echo "$(date): Points not updated (Current: $CURRENT_POINTS, Previous: $LAST_POINTS). Restarting service..." >> "$HOME/points_monitor_hyperspace.log"
+        screen -S "$SCREEN_NAME" -X stuff $'\003'
+        sleep 5
+        screen -S "$SCREEN_NAME" -X stuff "aios-cli kill\n"
+        sleep 5
+        screen -S "$SCREEN_NAME" -X stuff "aios-cli start --connect"
+    fi
+    LAST_POINTS="$CURRENT_POINTS"
+    sleep 10800
+done
+EOL
+
+  chmod +x "$HOME/points_monitor_hyperspace.sh"
+  nohup "$HOME/points_monitor_hyperspace.sh" > "$HOME/points_monitor_hyperspace.log" 2>&1 &
+  echo "Points monitoring started."
+}
+
+# Run installation and points monitoring automatically
+download_node
+start_points_monitor
